@@ -1,7 +1,53 @@
-*.o
-*.obj
-*.exe
-/build/
-/bin/
-.vscode/
+# ── Build directories ─────────────────────────────────────────────
+build/
+out/
+bin/
+cmake-build-*/
+cmake-build-debug/
+cmake-build-release/
+
+# ── CMake (in-tree configure leftovers) ───────────────────────────
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# ── Visual Studio / MSVC ──────────────────────────────────────────
 .vs/
+*.vcxproj.user
+*.sln.docstates
+*.suo
+*.user
+*.userosscache
+x64/
+x64/Debug/
+x64/Release/
+[Ww]in32/
+[Dd]ebug/
+[Rr]elease/
+
+# ── IDE / tooling ─────────────────────────────────────────────────
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+
+# ── Binaries & compile outputs ──────────────────────────────────────
+# Note: do NOT ignore *.obj — Wavefront mesh files use .obj (e.g. assets/bunny.obj).
+#       MSVC object files live under build/, which is already ignored.
+*.o
+*.a
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# ── OS ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────────
+*.log
