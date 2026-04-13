@@ -22,8 +22,6 @@ Interactive Cornell-box style scene using hardware ray tracing: progressive path
 
 **Video:** [Watch on YouTube](https://youtu.be/m0-LrBHhzvk)
 
-*(Hosting the demo off-repo keeps clones small. You can also attach `demo.mp4` under **Releases** or use [Git LFS](https://git-lfs.com) if you need the file in the repo.)*
-
 ### Features
 
 - Vulkan ray tracing pipeline, BLAS/TLAS, shader binding table
@@ -79,8 +77,6 @@ This project’s source code is provided as-is for portfolio and learning. Third
 ### 演示视频
 
 **视频：** [YouTube 观看](https://youtu.be/m0-LrBHhzvk)
-
-*（演示放在站外可减小仓库体积。若需把 `demo.mp4` 放进仓库，可用 **Releases** 附件或 [Git LFS](https://git-lfs.com)。）*
 
 ### 功能特性
 
