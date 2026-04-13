@@ -1,0 +1,85 @@
+#version 460
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, rgba32f) uniform image2D accumImg;
+layout(binding = 1, rgba32f) uniform image2D pingImg;
+layout(binding = 2, rgba32f) uniform image2D pongImg;
+layout(binding = 3, rgba32f) uniform image2D gbufferImg;
+layout(binding = 4, rgba32f) uniform image2D outputImg;
+
+layout(push_constant) uniform PC {
+    int stepSize;
+    int passIndex;
+    int isLastPass;
+} pc;
+
+const float kernel[5] = float[5](
+    1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0
+);
+
+const float SIGMA_COLOR  = 0.45;
+const float SIGMA_NORMAL = 128.0;
+const float SIGMA_DEPTH  = 0.01;
+
+float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+vec3 readColor(ivec2 p) {
+    if (pc.passIndex == 0)          return imageLoad(accumImg, p).rgb;
+    if ((pc.passIndex & 1) == 1)    return imageLoad(pingImg, p).rgb;
+    return imageLoad(pongImg, p).rgb;
+}
+
+void writeColor(ivec2 p, vec3 c) {
+    if (pc.isLastPass != 0) {
+        vec3 mapped = c / (c + vec3(1.0));
+        imageStore(outputImg, p, vec4(mapped, 1.0));
+    } else if ((pc.passIndex & 1) == 0) {
+        imageStore(pingImg, p, vec4(c, 1.0));
+    } else {
+        imageStore(pongImg, p, vec4(c, 1.0));
+    }
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(accumImg);
+    if (px.x >= sz.x || px.y >= sz.y) return;
+
+    vec3  cColor = readColor(px);
+    vec4  cGB    = imageLoad(gbufferImg, px);
+    vec3  cNorm  = cGB.xyz;
+    float cDepth = cGB.w;
+
+    if (length(cNorm) < 0.5) {
+        writeColor(px, cColor);
+        return;
+    }
+
+    float cLum = luminance(cColor);
+    vec3  sum  = vec3(0.0);
+    float wSum = 0.0;
+
+    for (int j = -2; j <= 2; j++) {
+        for (int i = -2; i <= 2; i++) {
+            ivec2 q = px + ivec2(i, j) * pc.stepSize;
+            q = clamp(q, ivec2(0), sz - 1);
+
+            vec3  qColor = readColor(q);
+            vec4  qGB    = imageLoad(gbufferImg, q);
+            vec3  qNorm  = qGB.xyz;
+            float qDepth = qGB.w;
+
+            float kw = kernel[i + 2] * kernel[j + 2];
+
+            float wn = pow(max(dot(cNorm, qNorm), 0.0), SIGMA_NORMAL);
+            float wd = exp(-abs(cDepth - qDepth) / max(cDepth * SIGMA_DEPTH, 0.001));
+            float wc = exp(-abs(cLum - luminance(qColor)) / (SIGMA_COLOR + 0.0001));
+
+            float w = kw * wn * wd * wc;
+            sum  += qColor * w;
+            wSum += w;
+        }
+    }
+
+    writeColor(px, sum / max(wSum, 1e-6));
+}

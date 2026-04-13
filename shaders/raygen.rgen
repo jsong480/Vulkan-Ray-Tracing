@@ -1,0 +1,204 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(binding = 0, set = 0) uniform accelerationStructureEXT tlas;
+layout(binding = 2, set = 0) uniform CameraUBO {
+    mat4 viewInverse;
+    mat4 projInverse;
+} cam;
+layout(binding = 7, set = 0, rgba32f) uniform image2D accumImage;
+layout(binding = 8, set = 0, rgba32f) uniform image2D gbufferImage;
+
+layout(push_constant) uniform PC {
+    uint  frameCount;
+    int   maxBounces;
+    float lightIntensity;
+    float glassIOR;
+} pc;
+
+struct HitPayload {
+    vec3 albedo;   float t;
+    vec3 normal;   float pad0;
+    vec3 emission; float ior;
+};
+
+layout(location = 0) rayPayloadEXT HitPayload prd;
+layout(location = 1) rayPayloadEXT float isShadowed;
+
+const float PI             = 3.14159265359;
+const vec3  LIGHT_MIN      = vec3(-0.25, 0.999, -0.25);
+const vec3  LIGHT_MAX      = vec3( 0.25, 0.999,  0.25);
+const vec3  LIGHT_NORMAL   = vec3(0.0, -1.0, 0.0);
+const float LIGHT_AREA     = 0.25;
+const vec3  LIGHT_EMISSION = vec3(17.0, 12.0, 4.0);
+
+// ── RNG (PCG) ───────────────────────────────────────────────────────────────
+
+uint rngState;
+
+float rand() {
+    rngState = rngState * 747796405u + 2891336453u;
+    uint word = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+    word = (word >> 22u) ^ word;
+    return float(word) * (1.0 / 4294967296.0);
+}
+
+// ── Cosine-weighted hemisphere sampling ─────────────────────────────────────
+
+vec3 cosineHemisphere(vec3 n) {
+    float r1 = rand(), r2 = rand();
+    float cosTheta = sqrt(r2);
+    float sinTheta = sqrt(1.0 - r2);
+    float phi = 2.0 * PI * r1;
+
+    vec3 t = normalize(cross(abs(n.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0), n));
+    vec3 b = cross(n, t);
+
+    return normalize(t * cos(phi) * sinTheta
+                   + b * sin(phi) * sinTheta
+                   + n * cosTheta);
+}
+
+// ── Schlick Fresnel approximation ───────────────────────────────────────────
+
+float schlickFresnel(float cosTheta, float ior) {
+    float R0 = (1.0 - ior) / (1.0 + ior);
+    R0 *= R0;
+    return R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0);
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
+void main() {
+    ivec2 px = ivec2(gl_LaunchIDEXT.xy);
+    rngState = uint(px.x) * 1973u + uint(px.y) * 9277u + pc.frameCount * 26699u + 1u;
+
+    vec2 jitter = vec2(rand(), rand()) - 0.5;
+    vec2 uv = (vec2(px) + 0.5 + jitter) / vec2(gl_LaunchSizeEXT.xy);
+    vec2 d  = uv * 2.0 - 1.0;
+
+    vec3 origin = (cam.viewInverse * vec4(0, 0, 0, 1)).xyz;
+    vec3 dir    = normalize((cam.viewInverse
+                  * vec4(normalize((cam.projInverse * vec4(d, 1, 1)).xyz), 0)).xyz);
+
+    vec3 radiance    = vec3(0.0);
+    vec3 throughput  = vec3(1.0);
+    vec3 firstNormal = vec3(0.0);
+    float firstDepth = 0.0;
+    bool lastSpecular = false;
+
+    for (int bounce = 0; bounce <= pc.maxBounces; bounce++) {
+        traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF,
+                    0, 0, 0,
+                    origin, 0.001, dir, 100.0, 0);
+
+        if (prd.t < 0.0) break;
+
+        if (bounce == 0) {
+            firstNormal = prd.normal;
+            firstDepth  = prd.t;
+        }
+
+        vec3 hitPos = origin + prd.t * dir;
+        vec3 N      = prd.normal;
+
+        bool emissive = (prd.emission.r + prd.emission.g + prd.emission.b) > 0.0;
+        if (emissive) {
+            if (bounce == 0 || lastSpecular)
+                radiance += throughput * prd.emission * pc.lightIntensity;
+            break;
+        }
+
+        bool isGlass = prd.ior > 0.0;
+
+        if (isGlass) {
+            // ── Glass: Fresnel reflection/refraction ──────────────────
+            float ior  = pc.glassIOR;
+            bool entering = dot(dir, N) < 0.0;
+            vec3 faceN = entering ? N : -N;
+            float eta  = entering ? (1.0 / ior) : ior;
+
+            float cosI    = abs(dot(dir, N));
+            float fresnel = schlickFresnel(cosI, ior);
+
+            vec3 refracted = refract(dir, faceN, eta);
+            bool tir = (dot(refracted, refracted) < 0.001);
+
+            if (tir || rand() < fresnel) {
+                dir    = reflect(dir, faceN);
+                origin = hitPos + faceN * 0.002;
+            } else {
+                dir    = normalize(refracted);
+                origin = hitPos - faceN * 0.002;
+            }
+
+            lastSpecular = true;
+
+        } else {
+            // ── Diffuse: NEE + cosine bounce ─────────────────────────
+            lastSpecular = false;
+
+            vec3 scaledEmission = LIGHT_EMISSION * pc.lightIntensity;
+
+            vec3 lp = vec3(mix(LIGHT_MIN.x, LIGHT_MAX.x, rand()),
+                           LIGHT_MIN.y,
+                           mix(LIGHT_MIN.z, LIGHT_MAX.z, rand()));
+            vec3  toL    = lp - hitPos;
+            float lDist  = length(toL);
+            vec3  lDir   = toL / lDist;
+            float NdotL  = max(dot(N, lDir), 0.0);
+            float lNdotL = max(dot(LIGHT_NORMAL, -lDir), 0.0);
+
+            if (NdotL > 0.0 && lNdotL > 0.0) {
+                isShadowed = 1.0;
+                traceRayEXT(tlas,
+                    gl_RayFlagsOpaqueEXT
+                    | gl_RayFlagsTerminateOnFirstHitEXT
+                    | gl_RayFlagsSkipClosestHitShaderEXT,
+                    0xFF, 0, 0, 1,
+                    hitPos + N * 0.001, 0.001,
+                    lDir, lDist - 0.002, 1);
+
+                if (isShadowed < 0.5) {
+                    radiance += throughput * scaledEmission
+                              * (prd.albedo / PI) * NdotL * lNdotL
+                              * LIGHT_AREA / (lDist * lDist);
+                }
+            }
+
+            dir    = cosineHemisphere(N);
+            origin = hitPos + N * 0.001;
+            throughput *= prd.albedo;
+        }
+
+        // Russian Roulette after bounce 2
+        if (bounce > 2) {
+            float p = max(throughput.r, max(throughput.g, throughput.b));
+            if (p < 0.001) break;
+            if (rand() > p) break;
+            throughput /= p;
+        }
+    }
+
+    // ── Progressive accumulation ────────────────────────────────────────────
+    vec3 accum;
+    if (pc.frameCount == 0u) {
+        accum = radiance;
+    } else {
+        vec3 prev = imageLoad(accumImage, px).rgb;
+        accum = mix(prev, radiance, 1.0 / float(pc.frameCount + 1u));
+    }
+    imageStore(accumImage, px, vec4(accum, 1.0));
+
+    if (pc.frameCount < 16u) {
+        if (pc.frameCount == 0u) {
+            imageStore(gbufferImage, px, vec4(firstNormal, firstDepth));
+        } else {
+            vec4 prev = imageLoad(gbufferImage, px);
+            float t   = 1.0 / float(pc.frameCount + 1u);
+            vec3 avgN = normalize(mix(prev.xyz, firstNormal, t));
+            float avgD = mix(prev.w, firstDepth, t);
+            imageStore(gbufferImage, px, vec4(avgN, avgD));
+        }
+    }
+}
